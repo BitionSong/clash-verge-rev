@@ -12,18 +12,36 @@ pub struct IClashTemp(pub Mapping);
 
 impl IClashTemp {
     pub fn new() -> Self {
-        match dirs::clash_path().and_then(|path| help::read_merge_mapping(&path)) {
-            Ok(map) => Self(Self::guard(map)),
+        let template = Self::template();
+        match dirs::clash_path().and_then(|path| help::read_mapping(&path)) {
+            Ok(mut map) => {
+                template.0.keys().for_each(|key| {
+                    if !map.contains_key(key) {
+                        map.insert(key.clone(), template.0.get(key).unwrap().clone());
+                    }
+                });
+                Self(Self::guard(map))
+            }
             Err(err) => {
                 log::error!(target: "app", "{err}");
-                Self::template()
+                template
             }
         }
     }
 
     pub fn template() -> Self {
         let mut map = Mapping::new();
-
+        let mut tun = Mapping::new();
+        tun.insert("enable".into(), false.into());
+        tun.insert("stack".into(), "mixed".into());
+        tun.insert("auto-route".into(), true.into());
+        tun.insert("strict-route".into(), false.into());
+        tun.insert("auto-detect-interface".into(), true.into());
+        tun.insert("dns-hijack".into(), vec!["any:53"].into());
+        #[cfg(not(target_os = "windows"))]
+        map.insert("redir-port".into(), 7895.into());
+        #[cfg(target_os = "linux")]
+        map.insert("tproxy-port".into(), 7896.into());
         map.insert("mixed-port".into(), 7897.into());
         map.insert("socks-port".into(), 7898.into());
         map.insert("port".into(), 7899.into());
@@ -31,17 +49,29 @@ impl IClashTemp {
         map.insert("allow-lan".into(), false.into());
         map.insert("mode".into(), "rule".into());
         map.insert("external-controller".into(), "127.0.0.1:9097".into());
+        let mut cors_map = Mapping::new();
+        cors_map.insert("allow-private-network".into(), true.into());
+        cors_map.insert("allow-origins".into(), vec!["*"].into());
         map.insert("secret".into(), "".into());
-
+        map.insert("tun".into(), tun.into());
+        map.insert("external-controller-cors".into(), cors_map.into());
+        map.insert("unified-delay".into(), true.into());
         Self(map)
     }
 
     fn guard(mut config: Mapping) -> Mapping {
+        #[cfg(not(target_os = "windows"))]
+        let redir_port = Self::guard_redir_port(&config);
+        #[cfg(target_os = "linux")]
+        let tproxy_port = Self::guard_tproxy_port(&config);
         let mixed_port = Self::guard_mixed_port(&config);
         let socks_port = Self::guard_socks_port(&config);
         let port = Self::guard_port(&config);
         let ctrl = Self::guard_server_ctrl(&config);
-
+        #[cfg(not(target_os = "windows"))]
+        config.insert("redir-port".into(), redir_port.into());
+        #[cfg(target_os = "linux")]
+        config.insert("tproxy-port".into(), tproxy_port.into());
         config.insert("mixed-port".into(), mixed_port.into());
         config.insert("socks-port".into(), socks_port.into());
         config.insert("port".into(), port.into());
@@ -93,19 +123,53 @@ impl IClashTemp {
             }),
         }
     }
+    #[cfg(not(target_os = "windows"))]
+    pub fn guard_redir_port(config: &Mapping) -> u16 {
+        let mut port = config
+            .get("redir-port")
+            .and_then(|value| match value {
+                Value::String(val_str) => val_str.parse().ok(),
+                Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
+                _ => None,
+            })
+            .unwrap_or(7895);
+        if port == 0 {
+            port = 7895;
+        }
+        port
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn guard_tproxy_port(config: &Mapping) -> u16 {
+        let mut port = config
+            .get("tproxy-port")
+            .and_then(|value| match value {
+                Value::String(val_str) => val_str.parse().ok(),
+                Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
+                _ => None,
+            })
+            .unwrap_or(7896);
+        if port == 0 {
+            port = 7896;
+        }
+        port
+    }
 
     pub fn guard_mixed_port(config: &Mapping) -> u16 {
-        let mut port = config
-            .get("mixed-port")
+        let raw_value = config.get("mixed-port");
+
+        let mut port = raw_value
             .and_then(|value| match value {
                 Value::String(val_str) => val_str.parse().ok(),
                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
                 _ => None,
             })
             .unwrap_or(7897);
+
         if port == 0 {
             port = 7897;
         }
+
         port
     }
 

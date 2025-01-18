@@ -1,23 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useLockFn } from "ahooks";
-import {
-  Box,
-  Button,
-  IconButton,
-  MenuItem,
-  Paper,
-  Select,
-  TextField,
-} from "@mui/material";
-import { useRecoilState } from "recoil";
+import { Box, Button, IconButton, MenuItem } from "@mui/material";
 import { Virtuoso } from "react-virtuoso";
 import { useTranslation } from "react-i18next";
 import { TableChartRounded, TableRowsRounded } from "@mui/icons-material";
 import { closeAllConnections } from "@/services/api";
-import { atomConnectionSetting } from "@/services/states";
+import { useConnectionSetting } from "@/services/states";
 import { useClashInfo } from "@/hooks/use-clash";
 import { BaseEmpty, BasePage } from "@/components/base";
-import { useWebsocket } from "@/hooks/use-websocket";
 import { ConnectionItem } from "@/components/connection/connection-item";
 import { ConnectionTable } from "@/components/connection/connection-table";
 import {
@@ -25,37 +15,113 @@ import {
   ConnectionDetailRef,
 } from "@/components/connection/connection-detail";
 import parseTraffic from "@/utils/parse-traffic";
+import { BaseSearchBox } from "@/components/base/base-search-box";
+import { BaseStyledSelect } from "@/components/base/base-styled-select";
+import useSWRSubscription from "swr/subscription";
+import { createSockette } from "@/utils/websocket";
+import { useTheme } from "@mui/material/styles";
+import { useVisibility } from "@/hooks/use-visibility";
 
-const initConn = { uploadTotal: 0, downloadTotal: 0, connections: [] };
+const initConn: IConnections = {
+  uploadTotal: 0,
+  downloadTotal: 0,
+  connections: [],
+};
 
 type OrderFunc = (list: IConnectionsItem[]) => IConnectionsItem[];
 
 const ConnectionsPage = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { clashInfo } = useClashInfo();
-
-  const [filterText, setFilterText] = useState("");
+  const pageVisible = useVisibility();
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  const [match, setMatch] = useState(() => (_: string) => true);
   const [curOrderOpt, setOrderOpt] = useState("Default");
-  const [connData, setConnData] = useState<IConnections>(initConn);
 
-  const [setting, setSetting] = useRecoilState(atomConnectionSetting);
+  const [setting, setSetting] = useConnectionSetting();
 
   const isTableLayout = setting.layout === "table";
 
   const orderOpts: Record<string, OrderFunc> = {
-    Default: (list) => list,
+    Default: (list) =>
+      list.sort(
+        (a, b) =>
+          new Date(b.start || "0").getTime()! -
+          new Date(a.start || "0").getTime()!,
+      ),
     "Upload Speed": (list) => list.sort((a, b) => b.curUpload! - a.curUpload!),
     "Download Speed": (list) =>
       list.sort((a, b) => b.curDownload! - a.curDownload!),
   };
 
+  const { data: connData = initConn } = useSWRSubscription<
+    IConnections,
+    any,
+    "getClashConnections" | null
+  >(
+    clashInfo && pageVisible ? "getClashConnections" : null,
+    (_key, { next }) => {
+      const { server = "", secret = "" } = clashInfo!;
+      const s = createSockette(
+        `ws://${server}/connections?token=${encodeURIComponent(secret)}`,
+        {
+          onmessage(event) {
+            // meta v1.15.0 出现 data.connections 为 null 的情况
+            const data = JSON.parse(event.data) as IConnections;
+            // 尽量与前一次 connections 的展示顺序保持一致
+            next(null, (old = initConn) => {
+              const oldConn = old.connections;
+              const maxLen = data.connections?.length;
+
+              const connections: IConnectionsItem[] = [];
+
+              const rest = (data.connections || []).filter((each) => {
+                const index = oldConn.findIndex((o) => o.id === each.id);
+
+                if (index >= 0 && index < maxLen) {
+                  const old = oldConn[index];
+                  each.curUpload = each.upload - old.upload;
+                  each.curDownload = each.download - old.download;
+
+                  connections[index] = each;
+                  return false;
+                }
+                return true;
+              });
+
+              for (let i = 0; i < maxLen; ++i) {
+                if (!connections[i] && rest.length > 0) {
+                  connections[i] = rest.shift()!;
+                  connections[i].curUpload = 0;
+                  connections[i].curDownload = 0;
+                }
+              }
+
+              return { ...data, connections };
+            });
+          },
+          onerror(event) {
+            next(event);
+          },
+        },
+        3,
+      );
+
+      return () => {
+        s.close();
+      };
+    },
+  );
+
   const [filterConn, download, upload] = useMemo(() => {
     const orderFunc = orderOpts[curOrderOpt];
     let connections = connData.connections.filter((conn) =>
-      (conn.metadata.host || conn.metadata.destinationIP)?.includes(filterText)
+      match(conn.metadata.host || conn.metadata.destinationIP || ""),
     );
 
     if (orderFunc) connections = orderFunc(connections);
+
     let download = 0;
     let upload = 0;
     connections.forEach((x) => {
@@ -63,57 +129,7 @@ const ConnectionsPage = () => {
       upload += x.upload;
     });
     return [connections, download, upload];
-  }, [connData, filterText, curOrderOpt]);
-
-  const { connect, disconnect } = useWebsocket(
-    (event) => {
-      // meta v1.15.0 出现data.connections为null的情况
-      const data = JSON.parse(event.data) as IConnections;
-      // 尽量与前一次connections的展示顺序保持一致
-      setConnData((old) => {
-        const oldConn = old.connections;
-        const maxLen = data.connections?.length;
-
-        const connections: typeof oldConn = [];
-
-        const rest = (data.connections || []).filter((each) => {
-          const index = oldConn.findIndex((o) => o.id === each.id);
-
-          if (index >= 0 && index < maxLen) {
-            const old = oldConn[index];
-            each.curUpload = each.upload - old.upload;
-            each.curDownload = each.download - old.download;
-
-            connections[index] = each;
-            return false;
-          }
-          return true;
-        });
-
-        for (let i = 0; i < maxLen; ++i) {
-          if (!connections[i] && rest.length > 0) {
-            connections[i] = rest.shift()!;
-            connections[i].curUpload = 0;
-            connections[i].curDownload = 0;
-          }
-        }
-
-        return { ...data, connections };
-      });
-    },
-    { errorCount: 3, retryInterval: 1000 }
-  );
-
-  useEffect(() => {
-    if (!clashInfo) return;
-
-    const { server = "", secret = "" } = clashInfo;
-    connect(`ws://${server}/connections?token=${encodeURIComponent(secret)}`);
-
-    return () => {
-      disconnect();
-    };
-  }, [clashInfo]);
+  }, [connData, match, curOrderOpt]);
 
   const onCloseAll = useLockFn(closeAllConnections);
 
@@ -122,32 +138,40 @@ const ConnectionsPage = () => {
   return (
     <BasePage
       full
-      title={t("Connections")}
+      title={<span style={{ whiteSpace: "nowrap" }}>{t("Connections")}</span>}
       contentStyle={{ height: "100%" }}
       header={
-        <Box sx={{ mt: 1, display: "flex", alignItems: "center", gap: 2 }}>
-          <Box sx={{ mx: 1 }}>Download: {parseTraffic(download)}</Box>
-          <Box sx={{ mx: 1 }}>Upload: {parseTraffic(upload)}</Box>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+          <Box sx={{ mx: 1 }}>
+            {t("Downloaded")}: {parseTraffic(download)}
+          </Box>
+          <Box sx={{ mx: 1 }}>
+            {t("Uploaded")}: {parseTraffic(upload)}
+          </Box>
           <IconButton
             color="inherit"
             size="small"
             onClick={() =>
               setSetting((o) =>
-                o.layout === "list"
+                o?.layout !== "table"
                   ? { ...o, layout: "table" }
-                  : { ...o, layout: "list" }
+                  : { ...o, layout: "list" },
               )
             }
           >
             {isTableLayout ? (
-              <TableChartRounded fontSize="inherit" />
+              <span title={t("List View")}>
+                <TableRowsRounded fontSize="inherit" />
+              </span>
             ) : (
-              <TableRowsRounded fontSize="inherit" />
+              <span title={t("Table View")}>
+                <TableChartRounded fontSize="inherit" />
+              </span>
             )}
           </IconButton>
 
           <Button size="small" variant="contained" onClick={onCloseAll}>
-            {t("Close All")}
+            <span style={{ whiteSpace: "nowrap" }}>{t("Close All")}</span>
           </Button>
         </Box>
       }
@@ -164,43 +188,31 @@ const ConnectionsPage = () => {
         }}
       >
         {!isTableLayout && (
-          <Select
-            size="small"
-            autoComplete="off"
+          <BaseStyledSelect
             value={curOrderOpt}
             onChange={(e) => setOrderOpt(e.target.value)}
-            sx={{
-              mr: 1,
-              width: i18n.language === "en" ? 190 : 120,
-              height: 33.375,
-              '[role="button"]': { py: 0.65 },
-            }}
           >
             {Object.keys(orderOpts).map((opt) => (
               <MenuItem key={opt} value={opt}>
                 <span style={{ fontSize: 14 }}>{t(opt)}</span>
               </MenuItem>
             ))}
-          </Select>
+          </BaseStyledSelect>
         )}
-
-        <TextField
-          hiddenLabel
-          fullWidth
-          size="small"
-          autoComplete="off"
-          spellCheck="false"
-          variant="outlined"
-          placeholder={t("Filter conditions")}
-          value={filterText}
-          onChange={(e) => setFilterText(e.target.value)}
-          sx={{ input: { py: 0.65, px: 1.25 } }}
-        />
+        <BaseSearchBox onSearch={(match) => setMatch(() => match)} />
       </Box>
 
-      <Box height="calc(100% - 50px)" sx={{ userSelect: "text" }}>
+      <Box
+        height="calc(100% - 65px)"
+        sx={{
+          userSelect: "text",
+          margin: "10px",
+          borderRadius: "8px",
+          bgcolor: isDark ? "#282a36" : "#ffffff",
+        }}
+      >
         {filterConn.length === 0 ? (
-          <BaseEmpty text="No Connections" />
+          <BaseEmpty />
         ) : isTableLayout ? (
           <ConnectionTable
             connections={filterConn}
@@ -209,7 +221,7 @@ const ConnectionsPage = () => {
         ) : (
           <Virtuoso
             data={filterConn}
-            itemContent={(index, item) => (
+            itemContent={(_, item) => (
               <ConnectionItem
                 value={item}
                 onShowDetail={() => detailRef.current?.open(item)}

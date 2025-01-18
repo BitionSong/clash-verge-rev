@@ -13,13 +13,14 @@ import {
   alpha,
 } from "@mui/material";
 import { BaseLoading } from "@/components/base";
-import { LanguageTwoTone } from "@mui/icons-material";
+import { LanguageRounded } from "@mui/icons-material";
 import { Notice } from "@/components/base";
 import { TestBox } from "./test-box";
 import delayManager from "@/services/delay";
-import { cmdTestDelay } from "@/services/cmds";
-import { listen, Event, UnlistenFn } from "@tauri-apps/api/event";
-
+import { cmdTestDelay, downloadIconCache } from "@/services/cmds";
+import { UnlistenFn } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { useListen } from "@/hooks/use-listen";
 interface Props {
   id: string;
   itemData: IVergeTestItem;
@@ -27,18 +28,42 @@ interface Props {
   onDelete: (uid: string) => void;
 }
 
-let eventListener: UnlistenFn | null = null;
+let eventListener: UnlistenFn = () => {};
 
 export const TestItem = (props: Props) => {
   const { itemData, onEdit, onDelete: onDeleteItem } = props;
-  const { attributes, listeners, setNodeRef, transform, transition } =
-    useSortable({ id: props.id });
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: props.id });
 
   const { t } = useTranslation();
   const [anchorEl, setAnchorEl] = useState<any>(null);
   const [position, setPosition] = useState({ left: 0, top: 0 });
   const [delay, setDelay] = useState(-1);
   const { uid, name, icon, url } = itemData;
+  const [iconCachePath, setIconCachePath] = useState("");
+  const { addListener } = useListen();
+
+  useEffect(() => {
+    initIconCachePath();
+  }, [icon]);
+
+  async function initIconCachePath() {
+    if (icon && icon.trim().startsWith("http")) {
+      const fileName = uid + "-" + getFileName(icon);
+      const iconPath = await downloadIconCache(icon, fileName);
+      setIconCachePath(convertFileSrc(iconPath));
+    }
+  }
+
+  function getFileName(url: string) {
+    return url.substring(url.lastIndexOf("/") + 1);
+  }
 
   const onDelay = async () => {
     setDelay(-2);
@@ -66,27 +91,26 @@ export const TestItem = (props: Props) => {
   ];
 
   const listenTsetEvent = async () => {
-    if (eventListener !== null) {
-      eventListener();
-    }
-    eventListener = await listen("verge://test-all", () => {
+    eventListener();
+    eventListener = await addListener("verge://test-all", () => {
       onDelay();
     });
   };
 
   useEffect(() => {
     listenTsetEvent();
-  }, []);
+  }, [url]);
 
   return (
     <Box
       sx={{
+        position: "relative",
         transform: CSS.Transform.toString(transform),
         transition,
+        zIndex: isDragging ? "calc(infinity)" : undefined,
       }}
     >
       <TestBox
-        onClick={onEditTest}
         onContextMenu={(event) => {
           const { clientX, clientY } = event;
           setPosition({ top: clientY, left: clientX });
@@ -104,10 +128,13 @@ export const TestItem = (props: Props) => {
           {icon && icon.trim() !== "" ? (
             <Box sx={{ display: "flex", justifyContent: "center" }}>
               {icon.trim().startsWith("http") && (
-                <img src={icon} height="40px" style={{ marginRight: "8px" }} />
+                <img
+                  src={iconCachePath === "" ? icon : iconCachePath}
+                  height="40px"
+                />
               )}
               {icon.trim().startsWith("data") && (
-                <img src={icon} height="40px" style={{ marginRight: "8px" }} />
+                <img src={icon} height="40px" />
               )}
               {icon.trim().startsWith("<svg") && (
                 <img
@@ -118,7 +145,7 @@ export const TestItem = (props: Props) => {
             </Box>
           ) : (
             <Box sx={{ display: "flex", justifyContent: "center" }}>
-              <LanguageTwoTone sx={{ height: "40px" }} fontSize="large" />
+              <LanguageRounded sx={{ height: "40px" }} fontSize="large" />
             </Box>
           )}
 
@@ -155,7 +182,7 @@ export const TestItem = (props: Props) => {
                 ":hover": { bgcolor: alpha(palette.primary.main, 0.15) },
               })}
             >
-              Check
+              {t("Test")}
             </Widget>
           )}
 
